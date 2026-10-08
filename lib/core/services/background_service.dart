@@ -45,7 +45,7 @@ class AppBackgroundService {
         notificationChannelId: 'deskfit_bg_channel',
         initialNotificationTitle: 'DeskFit Standing Monitor',
         initialNotificationContent: 'Monitoring scheduled standing times...',
-        foregroundServiceNotificationId: 777,
+        foregroundServiceNotificationId: 888,
       ),
       iosConfiguration: IosConfiguration(
         autoStart: true,
@@ -122,6 +122,7 @@ class AppBackgroundService {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('is_alarm_triggered', false);
     _service.invoke('stop_alarm_audio');
+    await NotificationService.instance.cancelStandingNotification();
   }
 
   /// Request background isolate to start alarm audio
@@ -161,6 +162,7 @@ void onStart(ServiceInstance service) async {
 
   // Tracking triggered state
   String? lastTriggeredScheduleKey;
+  int lastBroadcastSeconds = -1;
 
   Future<void> playLoopingAlarm() async {
     if (isAudioPlaying) return;
@@ -192,6 +194,8 @@ void onStart(ServiceInstance service) async {
         debugPrint('[BackgroundService Isolate] Alarm audio stopped by user.');
         final prefs = await SharedPreferences.getInstance();
         await prefs.setBool('is_alarm_triggered', false);
+
+        await NotificationService.instance.cancelStandingNotification();
 
         service.invoke('status', {
           'is_audio_playing': false,
@@ -234,11 +238,25 @@ void onStart(ServiceInstance service) async {
 
     final now = DateTime.now();
 
-    // If alarm is already triggered & sounding, maintain status until user dismisses
+    // If alarm is already triggered & sounding, maintain status and ongoing notification until user dismisses
     if (isAlarmActive || isAudioPlaying) {
       if (!isAudioPlaying) {
         await playLoopingAlarm();
       }
+
+      // Update foreground ongoing notification to active alarm break status (persistent)
+      if (service is AndroidServiceInstance) {
+        if (await service.isForegroundService()) {
+          await NotificationService.instance.showProgressNotification(
+            id: 888,
+            title: '⏰ Time to Stand Up!',
+            content: 'Standing break is active. Tap to open and stretch.',
+            showProgress: false,
+            payload: 'standing_overlay',
+          );
+        }
+      }
+
       service.invoke('status', {
         'is_triggered': true,
         'is_audio_playing': true,
@@ -249,6 +267,18 @@ void onStart(ServiceInstance service) async {
     }
 
     if (schedules.isEmpty) {
+      if (service is AndroidServiceInstance) {
+        if (await service.isForegroundService()) {
+          await NotificationService.instance.showProgressNotification(
+            id: 888,
+            title: 'DeskFit Standing Monitor',
+            content: 'No scheduled times set. Open app to add schedules.',
+            showProgress: false,
+            payload: 'standing_overlay',
+          );
+        }
+      }
+
       service.invoke('status', {
         'is_triggered': false,
         'is_audio_playing': false,
@@ -282,13 +312,26 @@ void onStart(ServiceInstance service) async {
           debugPrint('[BackgroundService Isolate] SCHEDULE TIME REACHED: ${schedule.formattedTime}!');
           await prefs.setBool('is_alarm_triggered', true);
 
-          // 1. Show high-priority notification with fullscreen intent
+          // 1. Update persistent foreground service notification (ID 888)
+          if (service is AndroidServiceInstance) {
+            if (await service.isForegroundService()) {
+              await NotificationService.instance.showProgressNotification(
+                id: 888,
+                title: '⏰ Standing Time: ${schedule.formattedTime}',
+                content: 'Time to stand up! Tap to open.',
+                showProgress: false,
+                payload: 'standing_overlay',
+              );
+            }
+          }
+
+          // 2. Show high-priority heads-up notification (ID 202)
           await NotificationService.instance.showStandingAlertNotification(
             title: '⏰ Standing Time: ${schedule.formattedTime}',
             body: 'Your scheduled standing time has arrived! Tap to open.',
           );
 
-          // 2. Play continuous looping alarm sound
+          // 3. Play continuous looping alarm sound
           await playLoopingAlarm();
           return;
         }
@@ -308,6 +351,28 @@ void onStart(ServiceInstance service) async {
     final remainingSecs = nextScheduledDateTime != null
         ? nextScheduledDateTime.difference(now).inSeconds
         : 0;
+
+    // Update foreground notification every minute or when schedule changes
+    if (remainingSecs ~/ 60 != lastBroadcastSeconds ~/ 60) {
+      lastBroadcastSeconds = remainingSecs;
+      if (service is AndroidServiceInstance) {
+        if (await service.isForegroundService()) {
+          final mins = remainingSecs ~/ 60;
+          final hours = mins ~/ 60;
+          final timeStr = hours > 0
+              ? '${hours}h ${mins % 60}m'
+              : '$mins mins';
+
+          await NotificationService.instance.showProgressNotification(
+            id: 888,
+            title: 'DeskFit Standing Monitor',
+            content: 'Next reminder at ${nextSchedule?.formattedTime} (in $timeStr)',
+            showProgress: false,
+            payload: 'standing_overlay',
+          );
+        }
+      }
+    }
 
     service.invoke('status', {
       'is_triggered': false,

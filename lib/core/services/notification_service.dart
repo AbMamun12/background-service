@@ -15,6 +15,9 @@ class NotificationService {
   /// Callback when notification is clicked
   static void Function(String? payload)? onNotificationClick;
 
+  Future<NotificationAppLaunchDetails?> getNotificationAppLaunchDetails() =>
+      _plugin.getNotificationAppLaunchDetails();
+
   Future<void> initialize({bool requestPermission = true}) async {
     if (_isInitialized) return;
 
@@ -50,7 +53,7 @@ class NotificationService {
       },
     );
 
-    // Request permissions on Android 13+ and setup channel
+    // Setup custom notification channels on Android
     if (Platform.isAndroid) {
       final androidImpl = _plugin.resolvePlatformSpecificImplementation<
           AndroidFlutterLocalNotificationsPlugin>();
@@ -58,6 +61,7 @@ class NotificationService {
         if (requestPermission) {
           try {
             await androidImpl.requestNotificationsPermission();
+            await androidImpl.requestExactAlarmsPermission();
           } catch (e) {
             debugPrint('[NotificationService] Notification permission request skipped/failed: $e');
           }
@@ -65,12 +69,22 @@ class NotificationService {
         try {
           await androidImpl.createNotificationChannel(
             const AndroidNotificationChannel(
-              'deskfit_standing_alerts',
-              'Standing & Posture Alerts',
-              description: 'Critical reminders to stand up and break sedentary posture',
+              'deskfit_alerts_channel',
+              'DeskFit Alerts',
+              description: 'This channel is used for DeskFit tracking and standing break reminders.',
               importance: Importance.max,
               playSound: true,
               enableVibration: true,
+            ),
+          );
+          await androidImpl.createNotificationChannel(
+            const AndroidNotificationChannel(
+              'deskfit_bg_channel',
+              'DeskFit Active Tracking',
+              description: 'This channel is used for DeskFit tracking notifications in foreground.',
+              importance: Importance.low,
+              playSound: false,
+              enableVibration: false,
             ),
           );
         } catch (e) {
@@ -83,18 +97,69 @@ class NotificationService {
     debugPrint('[NotificationService] Initialized successfully.');
   }
 
+  /// Displays or updates the persistent foreground service notification (ID 888)
+  Future<void> showProgressNotification({
+    required int id,
+    required String title,
+    required String content,
+    int progress = 0,
+    int maxProgress = 0,
+    bool showProgress = false,
+    String? payload,
+  }) async {
+    try {
+      if (!_isInitialized) await initialize(requestPermission: false);
+
+      final androidDetails = AndroidNotificationDetails(
+        'deskfit_bg_channel',
+        'DeskFit Active Tracking',
+        channelDescription:
+            'This channel is used for DeskFit tracking notifications in foreground.',
+        importance: Importance.low,
+        priority: Priority.low,
+        showProgress: showProgress,
+        maxProgress: maxProgress,
+        progress: progress,
+        ongoing: true,
+        onlyAlertOnce: true,
+        playSound: false,
+        enableVibration: false,
+      );
+
+      final details = NotificationDetails(
+        android: androidDetails,
+        iOS: const DarwinNotificationDetails(
+          presentAlert: false,
+          presentSound: false,
+        ),
+      );
+
+      await _plugin.show(
+        id: id,
+        title: title,
+        body: content,
+        notificationDetails: details,
+        payload: payload ?? 'standing_overlay',
+      );
+    } catch (e) {
+      debugPrint('[NotificationService] Error showing progress notification: $e');
+    }
+  }
+
   /// Show high-priority standing notification
   Future<void> showStandingAlertNotification({
     String title = '⏰ Time to Stand Up & Stretch!',
     String body = 'Break time reached. Tap to open standing overlay screen and stretch.',
   }) async {
     const androidDetails = AndroidNotificationDetails(
-      'deskfit_standing_alerts',
-      'Standing & Posture Alerts',
+      'deskfit_alerts_channel',
+      'DeskFit Alerts',
       channelDescription: 'Critical reminders to stand up and break sedentary posture',
       importance: Importance.max,
-      priority: Priority.high,
+      priority: Priority.max,
       fullScreenIntent: true,
+      ongoing: true,
+      autoCancel: false,
       category: AndroidNotificationCategory.alarm,
       ticker: 'Standing Reminder',
       playSound: true,
@@ -115,7 +180,7 @@ class NotificationService {
     );
 
     await _plugin.show(
-      id: 999,
+      id: 202,
       title: title,
       body: body,
       notificationDetails: details,
@@ -124,6 +189,6 @@ class NotificationService {
   }
 
   Future<void> cancelStandingNotification() async {
-    await _plugin.cancel(id: 999);
+    await _plugin.cancel(id: 202);
   }
 }

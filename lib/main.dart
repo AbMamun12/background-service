@@ -9,6 +9,28 @@ import 'features/standing/views/standing_overlay_view.dart';
 
 final GlobalKey<NavigatorState> rootNavigatorKey = GlobalKey<NavigatorState>();
 
+void navigateToStandingOverlay() {
+  if (StandingOverlayView.isStandingOverlayActive) return;
+
+  void pushScreen() {
+    if (StandingOverlayView.isStandingOverlayActive) return;
+    rootNavigatorKey.currentState?.push(
+      MaterialPageRoute(
+        builder: (_) => const StandingOverlayView(),
+        fullscreenDialog: true,
+      ),
+    );
+  }
+
+  if (rootNavigatorKey.currentState != null) {
+    pushScreen();
+  } else {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      pushScreen();
+    });
+  }
+}
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
@@ -20,19 +42,14 @@ void main() async {
     ),
   );
 
+  // Set notification click callback before initialize
+  NotificationService.onNotificationClick = (String? payload) {
+    debugPrint('[Main] Notification tapped payload: $payload -> opening StandingOverlayView');
+    navigateToStandingOverlay();
+  };
+
   // Initialize notification service
   await NotificationService.instance.initialize();
-
-  // Setup notification tap handler to open StandingOverlayView
-  NotificationService.onNotificationClick = (String? payload) {
-    debugPrint('[Main] Routing to StandingOverlayView via notification payload: $payload');
-    rootNavigatorKey.currentState?.push(
-      MaterialPageRoute(
-        builder: (_) => const StandingOverlayView(),
-        fullscreenDialog: true,
-      ),
-    );
-  };
 
   // Initialize background service configuration
   await AppBackgroundService.initialize();
@@ -40,13 +57,36 @@ void main() async {
   runApp(const DeskfitBackgroundApp());
 }
 
-class DeskfitBackgroundApp extends StatelessWidget {
+class DeskfitBackgroundApp extends StatefulWidget {
   const DeskfitBackgroundApp({super.key});
+
+  @override
+  State<DeskfitBackgroundApp> createState() => _DeskfitBackgroundAppState();
+}
+
+class _DeskfitBackgroundAppState extends State<DeskfitBackgroundApp> {
+  @override
+  void initState() {
+    super.initState();
+    // Check if app was launched via notification click (Cold start)
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      try {
+        final launchDetails =
+            await NotificationService.instance.getNotificationAppLaunchDetails();
+        if (launchDetails?.didNotificationLaunchApp ?? false) {
+          debugPrint('[Main] App launched via notification click. Navigating to StandingOverlayView...');
+          navigateToStandingOverlay();
+        }
+      } catch (e) {
+        debugPrint('[Main] Error checking notification launch details: $e');
+      }
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'DeskFit Background Service',
+      title: 'DeskFit Standing Schedule',
       navigatorKey: rootNavigatorKey,
       debugShowCheckedModeBanner: false,
       theme: ThemeData(

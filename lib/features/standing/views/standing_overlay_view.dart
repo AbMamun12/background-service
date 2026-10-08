@@ -9,6 +9,8 @@ import '../../../core/services/notification_service.dart';
 class StandingOverlayView extends StatefulWidget {
   const StandingOverlayView({super.key});
 
+  static bool isStandingOverlayActive = false;
+
   @override
   State<StandingOverlayView> createState() => _StandingOverlayViewState();
 }
@@ -26,6 +28,7 @@ class _StandingOverlayViewState extends State<StandingOverlayView>
   @override
   void initState() {
     super.initState();
+    StandingOverlayView.isStandingOverlayActive = true;
 
     // Dismiss any active system notifications
     NotificationService.instance.cancelStandingNotification();
@@ -85,6 +88,7 @@ class _StandingOverlayViewState extends State<StandingOverlayView>
 
   @override
   void dispose() {
+    StandingOverlayView.isStandingOverlayActive = false;
     _pulseController.dispose();
     _timer?.cancel();
     _localAudioPlayer.dispose();

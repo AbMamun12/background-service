@@ -43,12 +43,18 @@ class _HomeViewState extends State<HomeView> {
     // Listen to background service status stream
     _statusSubscription = AppBackgroundService.onStatusChange.listen((status) {
       if (status != null && mounted) {
+        final isTriggered = status['is_triggered'] ?? false;
+        final isAudioPlaying = status['is_audio_playing'] ?? false;
         setState(() {
           _remainingSeconds = status['remaining_seconds'] ?? 0;
           _nextTimeStr = status['next_time_str'];
-          _isAlarmTriggered = status['is_triggered'] ?? false;
-          _isAudioPlaying = status['is_audio_playing'] ?? false;
+          _isAlarmTriggered = isTriggered;
+          _isAudioPlaying = isAudioPlaying;
         });
+
+        if ((isTriggered || isAudioPlaying) && !StandingOverlayView.isStandingOverlayActive) {
+          _openStandingOverlay();
+        }
       }
     });
   }
@@ -69,10 +75,19 @@ class _HomeViewState extends State<HomeView> {
       _schedules = savedSchedules;
     }
 
+    final isTriggered = prefs.getBool('is_alarm_triggered') ?? false;
+
     if (mounted) {
       setState(() {
         _selectedSound = prefs.getString('alarm_sound') ?? 'audio/audio_1.wav';
+        _isAlarmTriggered = isTriggered;
       });
+
+      if (isTriggered && !StandingOverlayView.isStandingOverlayActive) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _openStandingOverlay();
+        });
+      }
     }
   }
 
@@ -162,6 +177,7 @@ class _HomeViewState extends State<HomeView> {
   }
 
   void _openStandingOverlay() {
+    if (StandingOverlayView.isStandingOverlayActive) return;
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => const StandingOverlayView(),

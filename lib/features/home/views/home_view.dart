@@ -27,6 +27,7 @@ class _HomeViewState extends State<HomeView> {
   bool _isPreviewPlaying = false;
 
   StreamSubscription? _statusSubscription;
+  Timer? _uiCountdownTimer;
 
   final List<Map<String, String>> _availableSounds = [
     {'name': 'Chime Alarm 1', 'path': 'audio/audio_1.wav'},
@@ -40,14 +41,12 @@ class _HomeViewState extends State<HomeView> {
     super.initState();
     _loadData();
 
-    // Listen to background service status stream
+    // Listen to background service status stream when alarm triggers
     _statusSubscription = AppBackgroundService.onStatusChange.listen((status) {
       if (status != null && mounted) {
         final isTriggered = status['is_triggered'] ?? false;
         final isAudioPlaying = status['is_audio_playing'] ?? false;
         setState(() {
-          _remainingSeconds = status['remaining_seconds'] ?? 0;
-          _nextTimeStr = status['next_time_str'];
           _isAlarmTriggered = isTriggered;
           _isAudioPlaying = isAudioPlaying;
         });
@@ -57,6 +56,54 @@ class _HomeViewState extends State<HomeView> {
         }
       }
     });
+  }
+
+  void _startUiCountdown() {
+    _uiCountdownTimer?.cancel();
+    _updateNextScheduleCountdown();
+    _uiCountdownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) {
+        _updateNextScheduleCountdown();
+      }
+    });
+  }
+
+  void _updateNextScheduleCountdown() {
+    if (_isAlarmTriggered || _isAudioPlaying) return;
+
+    final enabledSchedules = _schedules.where((s) => s.isEnabled).toList();
+    if (enabledSchedules.isEmpty) {
+      if (_nextTimeStr != null || _remainingSeconds != 0) {
+        setState(() {
+          _nextTimeStr = null;
+          _remainingSeconds = 0;
+        });
+      }
+      return;
+    }
+
+    final now = DateTime.now();
+    DateTime? nextDateTime;
+    StandingSchedule? nextSched;
+
+    for (final s in enabledSchedules) {
+      var candidate = DateTime(now.year, now.month, now.day, s.hour, s.minute);
+      if (candidate.isBefore(now)) {
+        candidate = candidate.add(const Duration(days: 1));
+      }
+      if (nextDateTime == null || candidate.isBefore(nextDateTime)) {
+        nextDateTime = candidate;
+        nextSched = s;
+      }
+    }
+
+    if (nextDateTime != null && nextSched != null) {
+      final diff = nextDateTime.difference(now).inSeconds;
+      setState(() {
+        _remainingSeconds = diff > 0 ? diff : 0;
+        _nextTimeStr = nextSched?.formattedTime;
+      });
+    }
   }
 
   Future<void> _loadData() async {
@@ -82,6 +129,8 @@ class _HomeViewState extends State<HomeView> {
         _selectedSound = prefs.getString('alarm_sound') ?? 'audio/audio_1.wav';
         _isAlarmTriggered = isTriggered;
       });
+
+      _startUiCountdown();
 
       if (isTriggered && !StandingOverlayView.isStandingOverlayActive) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -146,6 +195,7 @@ class _HomeViewState extends State<HomeView> {
       setState(() {
         _schedules = updated;
       });
+      _updateNextScheduleCountdown();
 
       if (mounted) {
         final formatted = pickedTime.format(context);
@@ -166,6 +216,7 @@ class _HomeViewState extends State<HomeView> {
     setState(() {
       _schedules = updated;
     });
+    _updateNextScheduleCountdown();
   }
 
   Future<void> _deleteSchedule(String id) async {
@@ -174,6 +225,7 @@ class _HomeViewState extends State<HomeView> {
     setState(() {
       _schedules = updated;
     });
+    _updateNextScheduleCountdown();
   }
 
   void _openStandingOverlay() {
@@ -199,6 +251,7 @@ class _HomeViewState extends State<HomeView> {
   @override
   void dispose() {
     _statusSubscription?.cancel();
+    _uiCountdownTimer?.cancel();
     _previewPlayer.dispose();
     super.dispose();
   }

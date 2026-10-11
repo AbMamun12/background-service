@@ -92,7 +92,7 @@ class _StandingOverlayViewState extends State<StandingOverlayView>
     _pulseController.dispose();
     _timer?.cancel();
     _localAudioPlayer.dispose();
-    AppBackgroundService.stopAlarmAudio();
+    AppBackgroundService.stopAlarm();
     super.dispose();
   }
 

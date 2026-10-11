@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:android_alarm_manager_plus/android_alarm_manager_plus.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'core/constants/app_colors.dart';
 import 'core/services/background_service.dart';
@@ -50,6 +51,9 @@ void main() async {
 
   // Initialize notification service
   await NotificationService.instance.initialize();
+
+  // Initialize Android Alarm Manager
+  await AndroidAlarmManager.initialize();
 
   // Initialize background service configuration
   await AppBackgroundService.initialize();

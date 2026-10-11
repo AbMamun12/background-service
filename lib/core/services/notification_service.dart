@@ -115,15 +115,17 @@ class NotificationService {
         'DeskFit Active Tracking',
         channelDescription:
             'This channel is used for DeskFit tracking notifications in foreground.',
-        importance: Importance.low,
-        priority: Priority.low,
+        importance: Importance.max,
+        priority: Priority.max,
         showProgress: showProgress,
         maxProgress: maxProgress,
         progress: progress,
         ongoing: true,
+        autoCancel: false,
         onlyAlertOnce: true,
         playSound: false,
         enableVibration: false,
+        visibility: NotificationVisibility.public,
       );
 
       final details = NotificationDetails(
@@ -164,6 +166,7 @@ class NotificationService {
       ticker: 'Standing Reminder',
       playSound: true,
       enableVibration: true,
+      visibility: NotificationVisibility.public,
     );
 
     const darwinDetails = DarwinNotificationDetails(
@@ -190,5 +193,9 @@ class NotificationService {
 
   Future<void> cancelStandingNotification() async {
     await _plugin.cancel(id: 202);
+  }
+
+  Future<void> cancelNotification(int id) async {
+    await _plugin.cancel(id: id);
   }
 }

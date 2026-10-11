@@ -4,6 +4,7 @@ import 'dart:ui';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:android_alarm_manager_plus/android_alarm_manager_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:audioplayers/audioplayers.dart';
 import '../models/standing_schedule.dart';
@@ -15,15 +16,15 @@ class AppBackgroundService {
   static final FlutterBackgroundService _service = FlutterBackgroundService();
   static const String _schedulesKey = 'standing_schedules';
 
-  /// Initialize background service configuration
+  /// Initialize background service configuration and sync alarms
   static Future<void> initialize() async {
     debugPrint('[BackgroundService] Configuring flutter_background_service...');
 
     const AndroidNotificationChannel channel = AndroidNotificationChannel(
       'deskfit_bg_channel',
       'DeskFit Standing Service',
-      description: 'Maintains scheduled timers and standing alarms in the background',
-      importance: Importance.low,
+      description: 'Active standing alarm and break alert service',
+      importance: Importance.max,
     );
 
     final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
@@ -40,29 +41,63 @@ class AppBackgroundService {
     await _service.configure(
       androidConfiguration: AndroidConfiguration(
         onStart: onStart,
-        autoStart: true,
+        autoStart: false, // Do NOT start automatically on boot/app launch
         isForegroundMode: true,
         notificationChannelId: 'deskfit_bg_channel',
-        initialNotificationTitle: 'DeskFit Standing Monitor',
-        initialNotificationContent: 'Monitoring scheduled standing times...',
+        initialNotificationTitle: '⏰ Time to Stand Up!',
+        initialNotificationContent: 'Standing break in progress...',
         foregroundServiceNotificationId: 888,
       ),
       iosConfiguration: IosConfiguration(
-        autoStart: true,
+        autoStart: false,
         onForeground: onStart,
         onBackground: onIosBackground,
       ),
     );
 
-    debugPrint('[BackgroundService] Configuration ready.');
+    debugPrint('[BackgroundService] Configuration ready. Syncing alarms...');
+    await syncAllAlarms();
   }
 
-  /// Ensure background service is running
-  static Future<void> ensureRunning() async {
-    final isRunning = await _service.isRunning();
-    if (!isRunning) {
-      await _service.startService();
+  /// Synchronize all configured schedules with AlarmManager
+  static Future<void> syncAllAlarms() async {
+    if (!Platform.isAndroid) return;
+    final schedules = await getSchedules();
+    for (final schedule in schedules) {
+      if (schedule.isEnabled) {
+        await scheduleAlarm(schedule);
+      } else {
+        await cancelAlarm(schedule.id);
+      }
     }
+  }
+
+  /// Schedule an exact alarm for a specific StandingSchedule
+  static Future<void> scheduleAlarm(StandingSchedule schedule) async {
+    if (!Platform.isAndroid) return;
+    final int alarmId = schedule.id.hashCode & 0x7FFFFFFF;
+    final now = DateTime.now();
+    var target = DateTime(now.year, now.month, now.day, schedule.hour, schedule.minute);
+    if (!target.isAfter(now)) {
+      target = target.add(const Duration(days: 1));
+    }
+    debugPrint('[BackgroundService] Scheduling exact alarm for ${schedule.formattedTime} (ID: $alarmId at $target)');
+    await AndroidAlarmManager.oneShotAt(
+      target,
+      alarmId,
+      alarmTriggerCallback,
+      exact: true,
+      wakeup: true,
+      rescheduleOnReboot: true,
+    );
+  }
+
+  /// Cancel an alarm by schedule ID
+  static Future<void> cancelAlarm(String id) async {
+    if (!Platform.isAndroid) return;
+    final int alarmId = id.hashCode & 0x7FFFFFFF;
+    debugPrint('[BackgroundService] Cancelling alarm ID: $alarmId');
+    await AndroidAlarmManager.cancel(alarmId);
   }
 
   /// Retrieve all configured schedules
@@ -78,13 +113,12 @@ class AppBackgroundService {
       ..sort((a, b) => (a.hour * 60 + a.minute).compareTo(b.hour * 60 + b.minute));
   }
 
-  /// Save all configured schedules
+  /// Save all configured schedules and resync exact alarms
   static Future<void> saveSchedules(List<StandingSchedule> list) async {
     final prefs = await SharedPreferences.getInstance();
     final raw = list.map((e) => e.toJson()).toList();
     await prefs.setStringList(_schedulesKey, raw);
-    _service.invoke('reload_schedules');
-    await ensureRunning();
+    await syncAllAlarms();
   }
 
   /// Add a new schedule
@@ -102,6 +136,7 @@ class AppBackgroundService {
 
   /// Delete a schedule by ID
   static Future<void> deleteSchedule(String id) async {
+    await cancelAlarm(id);
     final list = await getSchedules();
     list.removeWhere((item) => item.id == id);
     await saveSchedules(list);
@@ -117,12 +152,26 @@ class AppBackgroundService {
     }
   }
 
-  /// Stop currently sounding alarm and dismiss alert until next scheduled time
+  /// Start background service immediately (used on scheduled trigger)
+  static Future<void> startService() async {
+    final isRunning = await _service.isRunning();
+    if (!isRunning) {
+      await _service.startService();
+    } else {
+      _service.invoke('start_alarm_audio');
+    }
+  }
+
+  /// Stop currently sounding alarm, cancel notifications, and turn off background service completely
   static Future<void> stopAlarm() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('is_alarm_triggered', false);
+
     _service.invoke('stop_alarm_audio');
+    _service.invoke('stopService');
+
     await NotificationService.instance.cancelStandingNotification();
+    await NotificationService.instance.cancelNotification(888);
   }
 
   /// Request background isolate to start alarm audio
@@ -140,6 +189,69 @@ class AppBackgroundService {
       _service.on('status');
 }
 
+/// Top-level callback fired by AndroidAlarmManager at the exact scheduled time
+@pragma('vm:entry-point')
+void alarmTriggerCallback(int id) async {
+  debugPrint('[AlarmManager Callback] Alarm triggered for schedule ID: $id');
+  WidgetsFlutterBinding.ensureInitialized();
+  DartPluginRegistrant.ensureInitialized();
+
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.setBool('is_alarm_triggered', true);
+
+  // Automatically reschedule this specific schedule for tomorrow
+  try {
+    final rawList = prefs.getStringList(AppBackgroundService._schedulesKey) ?? [];
+    final schedules = rawList.map((e) => StandingSchedule.fromJson(e)).toList();
+    StandingSchedule? matchedSchedule;
+    for (final s in schedules) {
+      if ((s.id.hashCode & 0x7FFFFFFF) == id) {
+        matchedSchedule = s;
+        break;
+      }
+    }
+
+    if (matchedSchedule != null && matchedSchedule.isEnabled) {
+      final now = DateTime.now();
+      var tomorrow = DateTime(now.year, now.month, now.day, matchedSchedule.hour, matchedSchedule.minute);
+      if (!tomorrow.isAfter(now)) {
+        tomorrow = tomorrow.add(const Duration(days: 1));
+      }
+      debugPrint('[AlarmManager Callback] Rescheduling for next cycle at: $tomorrow');
+      await AndroidAlarmManager.oneShotAt(
+        tomorrow,
+        id,
+        alarmTriggerCallback,
+        exact: true,
+        wakeup: true,
+        rescheduleOnReboot: true,
+      );
+    }
+  } catch (e) {
+    debugPrint('[AlarmManager Callback] Error rescheduling next occurrence: $e');
+  }
+
+  // 1. Turn on background service so it runs foreground notification and audio in isolate
+  final service = FlutterBackgroundService();
+  final isRunning = await service.isRunning();
+  if (!isRunning) {
+    await service.startService();
+  } else {
+    service.invoke('start_alarm_audio');
+  }
+
+  // 2. Show high-priority heads-up notification with sound & vibration
+  try {
+    await NotificationService.instance.initialize(requestPermission: false);
+    await NotificationService.instance.showStandingAlertNotification(
+      title: '⏰ Time to Stand Up & Stretch!',
+      body: 'Scheduled break reached. Tap to open standing overlay.',
+    );
+  } catch (e) {
+    debugPrint('[AlarmManager Callback] Error displaying notification: $e');
+  }
+}
+
 @pragma('vm:entry-point')
 Future<bool> onIosBackground(ServiceInstance service) async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -147,22 +259,16 @@ Future<bool> onIosBackground(ServiceInstance service) async {
   return true;
 }
 
-/// Entry point for Background Service Isolate
+/// Entry point for Background Service Isolate (Runs ONLY while alarm is active)
 @pragma('vm:entry-point')
 void onStart(ServiceInstance service) async {
   DartPluginRegistrant.ensureInitialized();
-  debugPrint('[BackgroundService Isolate] onStart launched.');
+  debugPrint('[BackgroundService Isolate] onStart launched at scheduled alarm time.');
 
-  // Safe initialize without requesting UI permissions from background
   await NotificationService.instance.initialize(requestPermission: false);
 
   AudioPlayer? alarmPlayer;
   bool isAudioPlaying = false;
-  Timer? tickerTimer;
-
-  // Tracking triggered state
-  String? lastTriggeredScheduleKey;
-  int lastBroadcastSeconds = -1;
 
   Future<void> playLoopingAlarm() async {
     if (isAudioPlaying) return;
@@ -191,23 +297,43 @@ void onStart(ServiceInstance service) async {
       if (alarmPlayer != null) {
         await alarmPlayer?.stop();
         isAudioPlaying = false;
-        debugPrint('[BackgroundService Isolate] Alarm audio stopped by user.');
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.setBool('is_alarm_triggered', false);
-
-        await NotificationService.instance.cancelStandingNotification();
-
-        service.invoke('status', {
-          'is_audio_playing': false,
-          'is_triggered': false,
-        });
+        debugPrint('[BackgroundService Isolate] Alarm audio stopped.');
       }
     } catch (e) {
       debugPrint('[BackgroundService Isolate] Error stopping alarm: $e');
     }
   }
 
-  // Handle commands from main isolate
+  Timer? keepAliveTimer;
+
+  Future<void> updateForegroundNotification() async {
+    if (service is AndroidServiceInstance) {
+      service.setForegroundNotificationInfo(
+        title: '⏰ Time to Stand Up!',
+        content: 'Standing break is active. Tap to open and complete.',
+      );
+      await NotificationService.instance.showProgressNotification(
+        id: 888,
+        title: '⏰ Time to Stand Up!',
+        content: 'Standing break in progress. Tap to open overlay.',
+        showProgress: false,
+        payload: 'standing_overlay',
+      );
+    }
+  }
+
+  // Show active alarm foreground notification immediately
+  await updateForegroundNotification();
+
+  // Periodically refresh pinned notification while alarm is active
+  keepAliveTimer = Timer.periodic(const Duration(seconds: 3), (_) async {
+    await updateForegroundNotification();
+  });
+
+  // Automatically begin playing audio
+  await playLoopingAlarm();
+
+  // Listen for audio control commands
   service.on('start_alarm_audio').listen((event) async {
     await playLoopingAlarm();
   });
@@ -216,169 +342,22 @@ void onStart(ServiceInstance service) async {
     await stopLoopingAlarm();
   });
 
+  // When completed/dismissed, completely terminate service
   service.on('stopService').listen((event) async {
+    debugPrint('[BackgroundService Isolate] stopService received. Shutting down background service.');
+    keepAliveTimer?.cancel();
     await stopLoopingAlarm();
-    tickerTimer?.cancel();
-    service.stopSelf();
-  });
-
-  // Periodic ticker check (every second)
-  tickerTimer = Timer.periodic(const Duration(seconds: 1), (timer) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.reload();
+    await prefs.setBool('is_alarm_triggered', false);
 
-    final isAlarmActive = prefs.getBool('is_alarm_triggered') ?? false;
-
-    // Load schedules from SharedPreferences
-    final rawList = prefs.getStringList(AppBackgroundService._schedulesKey) ?? [];
-    final List<StandingSchedule> schedules = rawList
-        .map((e) => StandingSchedule.fromJson(e))
-        .where((s) => s.isEnabled)
-        .toList();
-
-    final now = DateTime.now();
-
-    // If alarm is already triggered & sounding, maintain status and ongoing notification until user dismisses
-    if (isAlarmActive || isAudioPlaying) {
-      if (!isAudioPlaying) {
-        await playLoopingAlarm();
-      }
-
-      // Update foreground ongoing notification to active alarm break status (persistent)
-      if (service is AndroidServiceInstance) {
-        if (await service.isForegroundService()) {
-          await NotificationService.instance.showProgressNotification(
-            id: 888,
-            title: '⏰ Time to Stand Up!',
-            content: 'Standing break is active. Tap to open and stretch.',
-            showProgress: false,
-            payload: 'standing_overlay',
-          );
-        }
-      }
-
-      service.invoke('status', {
-        'is_triggered': true,
-        'is_audio_playing': true,
-        'next_time_str': null,
-        'remaining_seconds': 0,
-      });
-      return;
-    }
-
-    if (schedules.isEmpty) {
-      if (service is AndroidServiceInstance) {
-        if (await service.isForegroundService()) {
-          await NotificationService.instance.showProgressNotification(
-            id: 888,
-            title: 'DeskFit Standing Monitor',
-            content: 'No scheduled times set. Open app to add schedules.',
-            showProgress: false,
-            payload: 'standing_overlay',
-          );
-        }
-      }
-
-      service.invoke('status', {
-        'is_triggered': false,
-        'is_audio_playing': false,
-        'next_time_str': null,
-        'remaining_seconds': 0,
-      });
-      return;
-    }
-
-    // Find next upcoming schedule & check if current time triggers
-    DateTime? nextScheduledDateTime;
-    StandingSchedule? nextSchedule;
-
-    for (final schedule in schedules) {
-      var candidate = DateTime(
-        now.year,
-        now.month,
-        now.day,
-        schedule.hour,
-        schedule.minute,
-      );
-
-      // Unique trigger key for this specific occurrence
-      final occurrenceKey = '${schedule.id}_${now.year}_${now.month}_${now.day}_${schedule.hour}_${schedule.minute}';
-
-      // Check if current time matches schedule (within same minute)
-      final diffSeconds = candidate.difference(now).inSeconds;
-      if (diffSeconds <= 0 && diffSeconds >= -59) {
-        if (lastTriggeredScheduleKey != occurrenceKey) {
-          lastTriggeredScheduleKey = occurrenceKey;
-          debugPrint('[BackgroundService Isolate] SCHEDULE TIME REACHED: ${schedule.formattedTime}!');
-          await prefs.setBool('is_alarm_triggered', true);
-
-          // 1. Update persistent foreground service notification (ID 888)
-          if (service is AndroidServiceInstance) {
-            if (await service.isForegroundService()) {
-              await NotificationService.instance.showProgressNotification(
-                id: 888,
-                title: '⏰ Standing Time: ${schedule.formattedTime}',
-                content: 'Time to stand up! Tap to open.',
-                showProgress: false,
-                payload: 'standing_overlay',
-              );
-            }
-          }
-
-          // 2. Show high-priority heads-up notification (ID 202)
-          await NotificationService.instance.showStandingAlertNotification(
-            title: '⏰ Standing Time: ${schedule.formattedTime}',
-            body: 'Your scheduled standing time has arrived! Tap to open.',
-          );
-
-          // 3. Play continuous looping alarm sound
-          await playLoopingAlarm();
-          return;
-        }
-      }
-
-      // If scheduled time has already passed today, candidate is for tomorrow
-      if (candidate.isBefore(now)) {
-        candidate = candidate.add(const Duration(days: 1));
-      }
-
-      if (nextScheduledDateTime == null || candidate.isBefore(nextScheduledDateTime)) {
-        nextScheduledDateTime = candidate;
-        nextSchedule = schedule;
-      }
-    }
-
-    final remainingSecs = nextScheduledDateTime != null
-        ? nextScheduledDateTime.difference(now).inSeconds
-        : 0;
-
-    // Update foreground notification every minute or when schedule changes
-    if (remainingSecs ~/ 60 != lastBroadcastSeconds ~/ 60) {
-      lastBroadcastSeconds = remainingSecs;
-      if (service is AndroidServiceInstance) {
-        if (await service.isForegroundService()) {
-          final mins = remainingSecs ~/ 60;
-          final hours = mins ~/ 60;
-          final timeStr = hours > 0
-              ? '${hours}h ${mins % 60}m'
-              : '$mins mins';
-
-          await NotificationService.instance.showProgressNotification(
-            id: 888,
-            title: 'DeskFit Standing Monitor',
-            content: 'Next reminder at ${nextSchedule?.formattedTime} (in $timeStr)',
-            showProgress: false,
-            payload: 'standing_overlay',
-          );
-        }
-      }
-    }
+    await NotificationService.instance.cancelStandingNotification();
+    await NotificationService.instance.cancelNotification(888);
 
     service.invoke('status', {
-      'is_triggered': false,
       'is_audio_playing': false,
-      'next_time_str': nextSchedule?.formattedTime,
-      'remaining_seconds': remainingSecs > 0 ? remainingSecs : 0,
+      'is_triggered': false,
     });
+
+    service.stopSelf(); // Shuts down Android Foreground Service completely
   });
 }
